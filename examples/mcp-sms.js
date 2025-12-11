@@ -1,3 +1,37 @@
+/**
+ * Infobip MCP SMS Load Testing Example
+ *
+ * This k6 script demonstrates how to perform load testing on Infobip MCP (Message Control Protocol)
+ * servers using the xk6-infobip-mcp extension. The test simulates SMS operations including sending
+ * messages and retrieving delivery reports.
+ *
+ * PREREQUISITES:
+ * - Valid Infobip account: https://www.infobip.com/signup
+ * - xk6-infobip-mcp extension compiled into k6
+ * - Access to Infobip MCP server endpoint
+ *
+ * REQUIRED ENVIRONMENT VARIABLES:
+ * - MCP_SERVER_URL: The Infobip MCP server endpoint URL
+ * - API_KEY: Your Infobip API key for authentication
+ * - MOBILE_NUMBER: Target mobile number for SMS delivery (in international format)
+ *
+ * EXAMPLE USAGE:
+ * ```bash
+ * export MCP_SERVER_URL="https://mcp.infobip.com/sms"
+ * export API_KEY="your-api-key-here"
+ * export MOBILE_NUMBER="+1234567890"
+ * k6 run examples/mcp-sms.js
+ * ```
+ *
+ * TEST SCENARIO:
+ * - Ramps up to 100 virtual users over 30 seconds
+ * - Maintains 100 VUs for 30 seconds
+ * - Ramps down to 0 VUs over 10 seconds
+ * - Each VU performs a 2-step SMS workflow:
+ *   1. Sends an SMS message using send_sms_messages tool
+ *   2. Retrieves delivery reports using get_sms_message_delivery_reports tool
+ */
+
 import { check, sleep } from 'k6';
 import mcp from "k6/x/infobip_mcp";
 import { randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
