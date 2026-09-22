@@ -1,6 +1,6 @@
 module github.com/infobip/xk6-infobip-mcp
 
-go 1.27.1
+go 1.26.0
 
 require (
 	github.com/grafana/sobek v0.0.0-20260915160442-8a431c44cd7b
