@@ -34,15 +34,15 @@ const STEPS = [
 ];
 
 export default function () {
-  // Initialize client only on first iteration for this VU
+  // One client per iteration. Works against both stateful and stateless
+  // Streamable HTTP servers; the transport handles session negotiation.
+  // Only send headers the server needs (e.g. auth). Content-Type, Accept
+  // and the Mcp-* headers are managed by the transport.
   const mcpClient = mcp.NewClient({
     endpoint: "http://localhost:8080/mcp",
-    isSSE: false,
     timeout: 60,
     headers: {
       Authorization: `App ${__ENV.API_KEY}`,
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
     },
   });
 

@@ -14,11 +14,8 @@ export default function () {
     const config = {
       endpoint: TEST_ENDPOINT,
       timeout: 30,
-      isSSE: false,
       headers: {
-        "Authorization": `App ${__ENV.API_KEY}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"
+        "Authorization": `App ${__ENV.API_KEY}`
       }
     };
 
@@ -35,21 +32,16 @@ export default function () {
     const client = NewClient({
       endpoint: TEST_ENDPOINT,
       timeout: 30,
-      isSSE: false,
       headers: {
-        "Authorization": `App ${__ENV.API_KEY}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"
+        "Authorization": `App ${__ENV.API_KEY}`
       }
     });
 
-    // Test CallTool method exists and can be called
     group("CallTool Method", function () {
       check(client, {
         "CallTool method exists": (c) => typeof c.callTool === "function",
       });
 
-      // Test calling with valid parameters
       const toolName = "send_sms_messages";
       const toolArgs = {
         "messages": [
@@ -92,7 +84,7 @@ export default function () {
       try {
         const result = client.closeConnection();
         check(result, {
-          "CloseConnection executes": (r) => true, // Method call completed
+          "CloseConnection executes": (r) => true,
         });
       } catch (e) {
         check(e, {

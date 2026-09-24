@@ -28,7 +28,6 @@ type MCPClient struct {
 type ClientConfig struct {
 	Endpoint string
 	Timeout  int64
-	IsSSE    bool
 	Headers  map[string]string
 }
 
@@ -45,9 +44,9 @@ func (m *module) newClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Ob
 		cfg.Timeout = 2
 	}
 
-	m.logger.Debugf("newClient started: Endpoint=%s, isSSE=%v, timeout=%v", cfg.Endpoint, cfg.IsSSE, cfg.Timeout)
+	m.logger.Debugf("newClient started: Endpoint=%s, timeout=%v", cfg.Endpoint, cfg.Timeout)
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "xk6-infobip-mcp", Version: "v1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: clientVersion}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeout)*time.Second)
 	defer cancel()
 
@@ -77,22 +76,24 @@ func (m *module) newClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Ob
 		m.logger.Debugf("Adding %d custom headers to HTTP client", len(cfg.Headers))
 	}
 
-	var session *mcp.ClientSession
-	var sessionErr error
-	if cfg.IsSSE {
-		sseTransport := &mcp.SSEClientTransport{
-			Endpoint:   cfg.Endpoint,
-			HTTPClient: httpClient,
-		}
-		session, sessionErr = client.Connect(ctx, sseTransport, &mcp.ClientSessionOptions{})
-	} else {
-		streamableTransport := &mcp.StreamableClientTransport{
-			Endpoint:   cfg.Endpoint,
-			HTTPClient: httpClient,
-			MaxRetries: -1,
-		}
-		session, sessionErr = client.Connect(ctx, streamableTransport, &mcp.ClientSessionOptions{})
+	// Streamable HTTP is the only supported transport. It works against both
+	// stateful servers (Mcp-Session-Id issued on initialize) and stateless
+	// servers (no session, every request is an independent POST). The legacy
+	// HTTP+SSE transport (spec 2024-11-05) is not supported.
+	//
+	// The SDK defaults are kept so the wire behaviour matches production MCP
+	// clients. On protocol >= 2026-07-28 (what stateless servers negotiate)
+	// the standalone GET/SSE stream no longer exists and the SDK never sends
+	// it, so a stateless session is initialize + tool calls, nothing else.
+	// On older protocol versions the client issues the GET after initialize;
+	// servers without a stream answer 405, which the RoundTripper exempts
+	// from http_req_failed.
+	streamableTransport := &mcp.StreamableClientTransport{
+		Endpoint:   cfg.Endpoint,
+		HTTPClient: httpClient,
+		MaxRetries: -1,
 	}
+	session, sessionErr := client.Connect(ctx, streamableTransport, &mcp.ClientSessionOptions{})
 
 	if sessionErr != nil {
 		common.Throw(rt, fmt.Errorf("failed to connect: %w", sessionErr))
@@ -194,14 +195,20 @@ func (client *MCPClient) CallTool(toolName string, args map[string]any, rt *sobe
 
 	txtResponse := ""
 	for _, c := range res.Content {
-		txtResponse += c.(*mcp.TextContent).Text
+		// Only text parts are returned to the script. Image, audio and resource
+		// parts are skipped rather than panicking the VU with an unchecked cast.
+		if tc, ok := c.(*mcp.TextContent); ok {
+			txtResponse += tc.Text
+		} else {
+			client.logger.Debugf("Skipping non-text content of type %T from tool %s", c, toolName)
+		}
 	}
 
 	client.logger.Debugf("=== MCP TOOL CALL ===")
 	client.logger.Debugf("Tool Name: %s", toolName)
 	client.logger.Debugf("Arguments: %+v", args)
 	client.logger.Debugf("Response IsError: %v", res.IsError)
-	client.logger.Debugf("Content text: ", txtResponse)
+	client.logger.Debugf("Content text: %s", txtResponse)
 	client.logger.Debugf("=====================")
 
 	client.pushMetrics(toolName, time.Since(start), res.IsError)

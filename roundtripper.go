@@ -61,15 +61,18 @@ func (r RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	failureValue := 1.0
 	if err == nil {
-		if statusCode == 404 && req.Method == "DELETE" {
+		switch {
+		case statusCode < 400:
 			failureValue = 0.0
-		}
-
-		if statusCode == 405 && req.Method == "GET" {
+		case statusCode == http.StatusNotFound && req.Method == http.MethodDelete:
+			// Session already gone on the server (expired or stateless); not a failure.
 			failureValue = 0.0
-		}
-
-		if statusCode < 400 {
+		case statusCode == http.StatusMethodNotAllowed && req.Method == http.MethodDelete:
+			// Stateless servers do not implement DELETE; not a failure.
+			failureValue = 0.0
+		case statusCode == http.StatusMethodNotAllowed && req.Method == http.MethodGet:
+			// Server offers no standalone SSE stream (spec-allowed, typical for
+			// stateless servers); not a failure.
 			failureValue = 0.0
 		}
 	}
