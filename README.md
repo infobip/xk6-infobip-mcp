@@ -126,11 +126,25 @@ Since MCP communication happens over HTTP, standard k6 HTTP metrics are also col
 
 ### Metric Tags
 
-All metrics include the following tags for detailed analysis:
+MCP metrics (`mcp_*`) carry:
 
-- **method**: HTTP method used (GET, POST, etc.)
+- **tool**: Name of the tool that was called. Use this in thresholds, e.g. `mcp_call_duration{tool:search_articles}`.
+- **method**: Same value as `tool`. Kept for backwards compatibility with existing dashboards; prefer `tool`.
+
+HTTP metrics (`http_*`) carry the standard k6 tags:
+
+- **method**: HTTP method used (GET, POST, DELETE)
 - **url**: The MCP server endpoint URL
 - **status**: HTTP response status code
+
+## Performance notes
+
+The extension is designed to add as little overhead as possible on top of the MCP server under test.
+
+- **Shared connection pool per VU.** Clients use the HTTP transport k6 already owns for the virtual user, the same one the built-in `k6/http` module uses. Sockets are kept alive and reused across clients and iterations, and released at VU teardown. The pool honours the standard k6 options `--no-connection-reuse`, `--no-vu-connection-reuse`, `batch`, `batchPerHost`, proxies and TLS settings.
+- **HTTP/2 when the server offers it.** Against a TLS endpoint that negotiates HTTP/2, all of a VU's tool calls are multiplexed over one connection, matching what production MCP clients do. Pass `--http-debug` or set `K6_HTTP_DEBUG` to inspect the traffic.
+- **Create one client per VU.** `NewClient` sends an `initialize` request. Creating a client inside the default function makes every iteration pay that round trip, and against a stateless server it doubles the request count. Keep the client in a module-level variable and create it lazily, as shown in `examples/mcp.js`. Create the client per iteration only when the connection handshake itself is what you want to load test.
+- **Batched metric samples.** Each tool call and each HTTP request emits its samples as a single batch to the k6 metrics pipeline, which keeps the per-call overhead low at high request rates.
 
 ## Contribute
 

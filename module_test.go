@@ -3,9 +3,11 @@ package infobip_mcp
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -73,7 +75,19 @@ func startTestMCPServer(t *testing.T, opts *mcp.StreamableHTTPOptions) string {
 	return ts.URL
 }
 
-func newTestRuntime(t *testing.T) *modulestest.Runtime {
+// countingDialer counts how many TCP connections were opened, so tests can
+// assert that the shared VU transport is actually reusing sockets.
+type countingDialer struct {
+	net.Dialer
+	dials atomic.Int64
+}
+
+func (d *countingDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.dials.Add(1)
+	return d.Dialer.DialContext(ctx, network, addr)
+}
+
+func newTestRuntime(t *testing.T) (*modulestest.Runtime, *countingDialer) {
 	t.Helper()
 
 	runtime := modulestest.NewRuntime(t)
@@ -97,6 +111,14 @@ func newTestRuntime(t *testing.T) *modulestest.Runtime {
 
 	runtime.VU.InitEnvField = nil
 	samples := make(chan metrics.SampleContainer, 1000)
+	dialer := &countingDialer{}
+	// Mirror what k6 itself hands to a VU: one shared keep-alive transport.
+	transport := &http.Transport{
+		DialContext:         dialer.DialContext,
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 6,
+	}
+	t.Cleanup(transport.CloseIdleConnections)
 	state := &lib.State{
 		Options: lib.Options{
 			SystemTags: &metrics.DefaultSystemTagSet,
@@ -104,11 +126,12 @@ func newTestRuntime(t *testing.T) *modulestest.Runtime {
 		Samples:        samples,
 		Tags:           lib.NewVUStateTags(registry.RootTagSet().WithTagsFromMap(map[string]string{"group": lib.RootGroupPath})),
 		BuiltinMetrics: builtinMetrics,
-		Dialer:         &net.Dialer{},
+		Dialer:         dialer,
+		Transport:      transport,
 	}
 	runtime.MoveToVUContext(state)
 
-	return runtime
+	return runtime, dialer
 }
 
 func Test_module(t *testing.T) {
@@ -149,7 +172,7 @@ func Test_module(t *testing.T) {
 			t.Parallel()
 
 			endpoint := startTestMCPServer(t, srv.opts)
-			runtime := newTestRuntime(t)
+			runtime, _ := newTestRuntime(t)
 			require.NoError(t, runtime.VU.Runtime().Set("ENDPOINT", endpoint))
 
 			for _, tt := range checks {
@@ -161,4 +184,55 @@ func Test_module(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Test_connectionReuse asserts that repeated create/call/close cycles on a
+// stateless server go through the VU's shared transport and reuse sockets,
+// instead of opening a fresh connection pool per client.
+func Test_connectionReuse(t *testing.T) {
+	t.Parallel()
+
+	endpoint := startTestMCPServer(t, &mcp.StreamableHTTPOptions{Stateless: true})
+	runtime, dialer := newTestRuntime(t)
+	require.NoError(t, runtime.VU.Runtime().Set("ENDPOINT", endpoint))
+
+	const iterations = 50
+	script := fmt.Sprintf(`(() => {
+		for (let i = 0; i < %d; i++) {
+			const c = mcp.NewClient({endpoint: ENDPOINT});
+			c.callTool("greet", {"name": "k6"});
+			c.closeConnection();
+		}
+		return true;
+	})()`, iterations)
+
+	got, err := runtime.RunOnEventLoop(script)
+	require.NoError(t, err)
+	require.True(t, got.ToBoolean())
+
+	// 50 clients x 2 requests each = 100 HTTP requests. Sequential calls on a
+	// keep-alive pool should need only a handful of sockets.
+	dials := dialer.dials.Load()
+	require.LessOrEqual(t, dials, int64(5), "expected sockets to be reused, but %d connections were dialed for %d clients", dials, iterations)
+}
+
+// Test_initContext asserts that NewClient fails cleanly when called outside
+// the VU context, where k6 provides no state or transport.
+func Test_initContext(t *testing.T) {
+	t.Parallel()
+
+	runtime := modulestest.NewRuntime(t)
+	registry := metrics.NewRegistry()
+	runtime.VU.InitEnvField = &common.InitEnvironment{
+		TestPreInitState: &lib.TestPreInitState{
+			Registry:       registry,
+			BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+			Logger:         logrus.New(),
+		},
+	}
+	m := new(rootModule).NewModuleInstance(runtime.VU)
+	require.NoError(t, runtime.VU.Runtime().Set("mcp", m.Exports().Named))
+
+	_, err := runtime.RunOnEventLoop(`mcp.NewClient({endpoint: "http://127.0.0.1:1/mcp"})`)
+	require.ErrorContains(t, err, "VU context")
 }

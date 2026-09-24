@@ -2,7 +2,6 @@ package infobip_mcp
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -46,30 +45,22 @@ func (m *module) newClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Ob
 
 	m.logger.Debugf("newClient started: Endpoint=%s, timeout=%v", cfg.Endpoint, cfg.Timeout)
 
+	state := m.vu.State()
+	if state == nil {
+		common.Throw(rt, errors.New("NewClient must be called in the VU context, not in the init context"))
+	}
+
 	client := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: clientVersion}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeout)*time.Second)
 	defer cancel()
 
-	var tlsConfig *tls.Config
-	if m.vu.State().TLSConfig != nil {
-		tlsConfig = m.vu.State().TLSConfig.Clone()
-		tlsConfig.NextProtos = []string{"http/1.1"}
-	}
-
 	httpClient := &http.Client{
-		Transport: &http.Transport{
-			DialContext:       m.vu.State().Dialer.DialContext,
-			Proxy:             http.ProxyFromEnvironment,
-			TLSClientConfig:   tlsConfig,
-			DisableKeepAlives: m.vu.State().Options.NoConnectionReuse.ValueOrZero() || m.vu.State().Options.NoVUConnectionReuse.ValueOrZero(),
+		Transport: RoundTripper{
+			headers:   cfg.Headers,
+			transport: state.Transport,
+			state:     state,
+			metrics:   m.metrics,
 		},
-	}
-
-	httpClient.Transport = RoundTripper{
-		headers:   cfg.Headers,
-		transport: httpClient.Transport,
-		state:     m.vu.State(),
-		metrics:   m.metrics,
 	}
 
 	if len(cfg.Headers) > 0 {
@@ -116,54 +107,48 @@ func (client *MCPClient) CloseConnection() error {
 	return client.session.Close()
 }
 
-// pushMetrics records performance metrics for MCP tool calls.
-func (client *MCPClient) pushMetrics(mcpAction string, duration time.Duration, isError bool) {
+// pushMetrics records performance metrics for one MCP tool call. All four
+// samples share one tag set and timestamp and are sent as a single
+// ConnectedSamples container, so a tool call costs one channel send instead
+// of four.
+func (client *MCPClient) pushMetrics(toolName string, duration time.Duration, isError bool) {
 	state := client.vu.State()
-	tags := state.Tags.GetCurrentValues().Tags.With(
-		"method", mcpAction,
-	)
-	metrics.PushIfNotDone(context.Background(), state.Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: client.metrics.MCPCallDuration,
-			Tags:   tags,
-		},
-		Time:  time.Now(),
-		Value: float64(duration) / float64(time.Millisecond),
+	tags := state.Tags.GetCurrentValues().Tags.WithTagsFromMap(map[string]string{
+		"method": toolName,
+		"tool":   toolName,
 	})
+	now := time.Now()
 
-	metrics.PushIfNotDone(context.Background(), state.Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: client.metrics.MCPCalls,
-			Tags:   tags,
-		},
-		Time:  time.Now(),
-		Value: 1,
-	})
-
-	errValue := 0
-	successValue := 1
-
+	errValue, successValue := 0.0, 1.0
 	if isError {
-		errValue = 1
-		successValue = 0
+		errValue, successValue = 1.0, 0.0
 	}
 
-	metrics.PushIfNotDone(context.Background(), state.Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: client.metrics.MCPErrors,
-			Tags:   tags,
+	metrics.PushIfNotDone(context.Background(), state.Samples, metrics.ConnectedSamples{
+		Samples: []metrics.Sample{
+			{
+				TimeSeries: metrics.TimeSeries{Metric: client.metrics.MCPCallDuration, Tags: tags},
+				Time:       now,
+				Value:      metrics.D(duration),
+			},
+			{
+				TimeSeries: metrics.TimeSeries{Metric: client.metrics.MCPCalls, Tags: tags},
+				Time:       now,
+				Value:      1,
+			},
+			{
+				TimeSeries: metrics.TimeSeries{Metric: client.metrics.MCPErrors, Tags: tags},
+				Time:       now,
+				Value:      errValue,
+			},
+			{
+				TimeSeries: metrics.TimeSeries{Metric: client.metrics.MCPSuccess, Tags: tags},
+				Time:       now,
+				Value:      successValue,
+			},
 		},
-		Time:  time.Now(),
-		Value: float64(errValue),
-	})
-
-	metrics.PushIfNotDone(context.Background(), client.vu.State().Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: client.metrics.MCPSuccess,
-			Tags:   tags,
-		},
-		Time:  time.Now(),
-		Value: float64(successValue),
+		Tags: tags,
+		Time: now,
 	})
 }
 
@@ -183,13 +168,13 @@ func (client *MCPClient) CallTool(toolName string, args map[string]any, rt *sobe
 	ctx, cancel := context.WithTimeout(client.ctx, client.toolCallTimeout)
 	defer cancel()
 
-	start := time.Now().UTC()
+	start := time.Now()
 	res, err := client.session.CallTool(ctx, params)
 	callDuration := time.Since(start)
 
 	if err != nil {
 		client.logger.Debugf("Tool call failed after %v: %v", callDuration, err)
-		client.pushMetrics(toolName, time.Since(start), true)
+		client.pushMetrics(toolName, callDuration, true)
 		return ""
 	}
 
@@ -211,6 +196,6 @@ func (client *MCPClient) CallTool(toolName string, args map[string]any, rt *sobe
 	client.logger.Debugf("Content text: %s", txtResponse)
 	client.logger.Debugf("=====================")
 
-	client.pushMetrics(toolName, time.Since(start), res.IsError)
+	client.pushMetrics(toolName, callDuration, res.IsError)
 	return txtResponse
 }
