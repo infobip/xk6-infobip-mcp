@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/grafana/sobek"
@@ -178,16 +179,18 @@ func (client *MCPClient) CallTool(toolName string, args map[string]any, rt *sobe
 		return ""
 	}
 
-	txtResponse := ""
+	var stringBuilder strings.Builder
 	for _, c := range res.Content {
 		// Only text parts are returned to the script. Image, audio and resource
 		// parts are skipped rather than panicking the VU with an unchecked cast.
 		if tc, ok := c.(*mcp.TextContent); ok {
-			txtResponse += tc.Text
+		    _, _ = stringBuilder.WriteString(tc.Text)
 		} else {
 			client.logger.Debugf("Skipping non-text content of type %T from tool %s", c, toolName)
 		}
 	}
+
+	txtResponse := stringBuilder.String()
 
 	client.logger.Debugf("=== MCP TOOL CALL ===")
 	client.logger.Debugf("Tool Name: %s", toolName)
