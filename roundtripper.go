@@ -41,46 +41,44 @@ func (r RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	})
 	now := time.Now()
 
-	metrics.PushIfNotDone(context.Background(), r.state.Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: r.metrics.HTTPRequestDuration,
-			Tags:   tags,
-		},
-		Time:  now,
-		Value: float64(duration) / float64(time.Millisecond),
-	})
-
-	metrics.PushIfNotDone(context.Background(), r.state.Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: r.metrics.HTTPRequestCount,
-			Tags:   tags,
-		},
-		Time:  now,
-		Value: 1,
-	})
-
 	failureValue := 1.0
 	if err == nil {
-		if statusCode == 404 && req.Method == "DELETE" {
+		switch {
+		case statusCode < 400:
 			failureValue = 0.0
-		}
-
-		if statusCode == 405 && req.Method == "GET" {
+		case statusCode == http.StatusNotFound && req.Method == http.MethodDelete:
+			// Session already gone on the server (expired or stateless); not a failure.
 			failureValue = 0.0
-		}
-
-		if statusCode < 400 {
+		case statusCode == http.StatusMethodNotAllowed && req.Method == http.MethodDelete:
+			// Stateless servers do not implement DELETE; not a failure.
+			failureValue = 0.0
+		case statusCode == http.StatusMethodNotAllowed && req.Method == http.MethodGet:
+			// Server offers no standalone SSE stream (spec-allowed, typical for
+			// stateless servers); not a failure.
 			failureValue = 0.0
 		}
 	}
 
-	metrics.PushIfNotDone(context.Background(), r.state.Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: r.metrics.HTTPRequestErrors,
-			Tags:   tags,
+	metrics.PushIfNotDone(context.Background(), r.state.Samples, metrics.ConnectedSamples{
+		Samples: []metrics.Sample{
+			{
+				TimeSeries: metrics.TimeSeries{Metric: r.metrics.HTTPRequestDuration, Tags: tags},
+				Time:       now,
+				Value:      metrics.D(duration),
+			},
+			{
+				TimeSeries: metrics.TimeSeries{Metric: r.metrics.HTTPRequestCount, Tags: tags},
+				Time:       now,
+				Value:      1,
+			},
+			{
+				TimeSeries: metrics.TimeSeries{Metric: r.metrics.HTTPRequestErrors, Tags: tags},
+				Time:       now,
+				Value:      failureValue,
+			},
 		},
-		Time:  now,
-		Value: failureValue,
+		Tags: tags,
+		Time: now,
 	})
 
 	return resp, err
