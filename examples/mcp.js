@@ -33,22 +33,34 @@ const STEPS = [
   },
 ];
 
+// Module-level state is per VU in k6. Creating the client lazily here means
+// each VU runs `initialize` once and then reuses the session for every
+// iteration, which is how production MCP clients behave and avoids paying
+// the handshake on every iteration.
+let mcpClient = null;
+
+function getClient() {
+  if (mcpClient === null) {
+    // Works against both stateful and stateless Streamable HTTP servers; the
+    // transport handles session negotiation. Only send headers the server
+    // needs (e.g. auth). Content-Type, Accept and the Mcp-* headers are
+    // managed by the transport.
+    mcpClient = mcp.NewClient({
+      endpoint: "http://localhost:8080/mcp",
+      timeout: 60,
+      headers: {
+        Authorization: `App ${__ENV.API_KEY}`,
+      },
+    });
+  }
+  return mcpClient;
+}
+
 export default function () {
-  // Initialize client only on first iteration for this VU
-  const mcpClient = mcp.NewClient({
-    endpoint: "http://localhost:8080/mcp",
-    isSSE: false,
-    timeout: 60,
-    headers: {
-      Authorization: `App ${__ENV.API_KEY}`,
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-    },
-  });
+  const client = getClient();
 
   for (const stepConfig of STEPS) {
-    // Reuse the same client for all iterations
-    let res = mcpClient.callTool(stepConfig.tool, stepConfig.args);
+    const res = client.callTool(stepConfig.tool, stepConfig.args);
     check(res, {
       "result is not empty": (r) => r !== "",
     });
@@ -57,6 +69,11 @@ export default function () {
       sleep(randomIntBetween(5, 10));
     }
   }
-
-  mcpClient.closeConnection();
 }
+
+// If you want to measure the connection handshake as part of the load
+// instead, drop getClient() and create/close a client inside default():
+//
+//   const client = mcp.NewClient({...});
+//   client.callTool(...);
+//   client.closeConnection();

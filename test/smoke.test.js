@@ -12,14 +12,8 @@ export default function () {
     NewClient({
       endpoint: "http://127.0.0.1/mcp",
       timeout: 1,
-      isSSE: false,
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"
-      }
     });
   } catch (e) {
-    // Expected to fail without real MCP server
     check(e, {
       "NewClient throws expected error": (err) => err instanceof Error && err.message.includes("connect: connection refused"),
     });
